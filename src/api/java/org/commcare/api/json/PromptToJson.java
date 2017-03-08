@@ -10,6 +10,7 @@ import org.javarosa.form.api.FormEntryCaption;
 import org.javarosa.form.api.FormEntryController;
 import org.javarosa.form.api.FormEntryModel;
 import org.javarosa.form.api.FormEntryPrompt;
+import org.javarosa.xpath.XPathTypeMismatchException;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
 import org.json.JSONArray;
@@ -38,6 +39,7 @@ public class PromptToJson {
         questionJson.put("datatype", jsonNullIfNull(parseDataType(prompt)));
         questionJson.put("control", jsonNullIfNull(prompt.getControlType()));
         questionJson.put("required", prompt.isRequired() ? 1 : 0);
+        questionJson.put("hint", jsonNullIfNull(prompt.getHintText()));
         parseQuestionAnswer(questionJson, prompt);
         questionJson.put("ix", jsonNullIfNull(prompt.getIndex()));
 
@@ -126,6 +128,7 @@ public class PromptToJson {
         }
         switch (prompt.getDataType()) {
             case Constants.DATATYPE_NULL:
+            case Constants.DATATYPE_BARCODE:
             case Constants.DATATYPE_TEXT:
                 obj.put("answer", answerValue.getDisplayText());
                 return;
@@ -143,23 +146,26 @@ public class PromptToJson {
                 obj.put("answer", answerValue.getDisplayText());
                 return;
             case Constants.DATATYPE_DATE_TIME:
-                Date answer = (Date) answerValue.getValue();
-                Calendar calendar = Calendar.getInstance();
-                calendar.setTime(answer);
-                obj.put("answer", new DateTime(calendar.getTime(), DateTimeZone.forTimeZone(calendar.getTimeZone())).toString("yyyy-MM-dd'T'HH:mm:ssZZ"));
+                DateTime answer = new DateTime(answerValue.getValue());
+                obj.put("answer", answer.toString("yyyy-MM-dd'T'HH:mm:ssZZ"));
                 return;
             case Constants.DATATYPE_CHOICE:
                 Selection singleSelection = ((Selection) answerValue.getValue());
                 singleSelection.attachChoice(prompt.getQuestion());
-                obj.put("answer", ((Selection) answerValue.getValue()).getTouchformsIndex());
+                int singleOrdinal = singleSelection.getTouchformsIndex();
+                if (singleOrdinal > 0) {
+                    obj.put("answer", singleOrdinal);
+                }
                 return;
             case Constants.DATATYPE_CHOICE_LIST:
                 Vector<Selection> selections = ((SelectMultiData) answerValue).getValue();
                 JSONArray acc = new JSONArray();
                 for (Selection selection : selections) {
                     selection.attachChoice(prompt.getQuestion());
-                    int ordinal = selection.getTouchformsIndex();
-                    acc.put(ordinal);
+                    int multiOrdinal = selection.getTouchformsIndex();
+                    if (multiOrdinal > 0){
+                        acc.put(multiOrdinal);
+                    }
                 }
                 obj.put("answer", acc);
                 return;

@@ -1,5 +1,9 @@
 package org.commcare.api.persistence;
 
+import org.commcare.modern.database.DatabaseHelper;
+import org.commcare.modern.database.TableBuilder;
+import org.commcare.modern.util.Pair;
+import org.javarosa.core.services.Logger;
 import org.javarosa.core.services.PrototypeManager;
 import org.javarosa.core.services.storage.EntityFilter;
 import org.javarosa.core.services.storage.IStorageUtilityIndexed;
@@ -8,18 +12,12 @@ import org.javarosa.core.util.InvalidIndexException;
 import org.javarosa.core.util.externalizable.DeserializationException;
 import org.sqlite.javax.SQLiteConnectionPoolDataSource;
 
-import java.io.ByteArrayInputStream;
-import java.io.DataInputStream;
-import java.io.File;
-import java.io.IOException;
+import java.io.*;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.Iterator;
-import java.util.Map;
-import java.util.NoSuchElementException;
-import java.util.Vector;
+import java.util.*;
 
 /**
  * IStorageIndexedUtility implemented on SQLite using JDBC. Contains all the functionality
@@ -42,20 +40,31 @@ public class SqliteIndexedStorageUtility<T extends Persistable>
         databaseFolder = new File(databasePath);
     }
 
+    public SqliteIndexedStorageUtility(T prototype, String sandboxId,
+                                       String tableName, String databasePath) {
+        this((Class<T>) prototype.getClass(), sandboxId, tableName, databasePath);
+    }
+
     public SqliteIndexedStorageUtility(Class<T> prototype, String sandboxId,
                                        String tableName, String databasePath) {
+        this(prototype, sandboxId, tableName, databasePath, true);
+    }
+
+    public SqliteIndexedStorageUtility(Class<T> prototype, String sandboxId,
+                                       String tableName, String databasePath, boolean initialize) {
         this(sandboxId, tableName, databasePath);
         this.prototype = prototype;
-
-        try {
-            buildTableFromInstance(prototype.newInstance());
-        } catch (InstantiationException | IllegalAccessException | ClassNotFoundException e) {
-            throw new RuntimeException(e);
+        if (initialize) {
+            try {
+                buildTableFromInstance(prototype.newInstance());
+            } catch (InstantiationException | IllegalAccessException | ClassNotFoundException e) {
+                throw new RuntimeException(e);
+            }
         }
     }
 
     public void rebuildTable(T prototypeInstance) {
-        this.prototype = (Class<T>)prototypeInstance.getClass();
+        this.prototype = (Class<T>) prototypeInstance.getClass();
 
         try {
             SqlHelper.dropTable(getConnection(), tableName);
@@ -109,8 +118,6 @@ public class SqliteIndexedStorageUtility<T extends Persistable>
         try {
             c = getConnection();
             SqlHelper.createTable(c, tableName, instance);
-            // This enables concurrent reads and writes, needed for updates
-            c.prepareStatement("PRAGMA journal_mode=WAL;").execute();
             c.close();
         } catch (SQLException e) {
             e.printStackTrace();
@@ -125,11 +132,10 @@ public class SqliteIndexedStorageUtility<T extends Persistable>
         }
     }
 
-    Connection getConnection() throws SQLException, ClassNotFoundException {
+    public Connection getConnection() throws SQLException, ClassNotFoundException {
         if (!databaseFolder.exists()) {
             databaseFolder.mkdir();
         }
-
         Class.forName("org.sqlite.JDBC");
         SQLiteConnectionPoolDataSource dataSource = new SQLiteConnectionPoolDataSource();
         dataSource.setUrl("jdbc:sqlite:" + databaseFolder + "/" + this.sandboxId + ".db");
@@ -193,6 +199,15 @@ public class SqliteIndexedStorageUtility<T extends Persistable>
         return readFromBytes(mBytes);
     }
 
+    public static Vector<Integer> fillIdWindow(ResultSet resultSet, String columnName, LinkedHashSet newReturn) throws SQLException {
+        Vector<Integer> ids = new Vector<>();
+        while (resultSet.next()) {
+            ids.add(resultSet.getInt(columnName));
+            newReturn.add(resultSet.getInt(columnName));
+        }
+        return ids;
+    }
+
     @Override
     public Vector<Integer> getIDsForValue(String fieldName, Object value) {
         Connection c = null;
@@ -200,17 +215,13 @@ public class SqliteIndexedStorageUtility<T extends Persistable>
         try {
             c = this.getConnection();
             preparedStatement = SqlHelper.prepareTableSelectStatement(c, this.tableName,
-                    new String[]{fieldName}, new String[]{(String) value}, prototype.newInstance());
+                    new String[]{fieldName}, new String[]{(String) value});
             if (preparedStatement == null) {
                 return null;
             }
             ResultSet rs = preparedStatement.executeQuery();
-            Vector<Integer> ids = new Vector<>();
-            while (rs.next()) {
-                ids.add(rs.getInt(org.commcare.modern.database.DatabaseHelper.ID_COL));
-            }
-            return ids;
-        } catch (InstantiationException | IllegalAccessException | SQLException | ClassNotFoundException e) {
+            return fillIdWindow(rs, DatabaseHelper.ID_COL, new LinkedHashSet<Integer>());
+        } catch (SQLException | ClassNotFoundException e) {
             throw new RuntimeException(e);
         } finally {
             try {
@@ -235,16 +246,14 @@ public class SqliteIndexedStorageUtility<T extends Persistable>
             c = this.getConnection();
             preparedStatement =
                     SqlHelper.prepareTableSelectStatement(c, this.tableName,
-                            new String[]{fieldName}, new String[]{(String) value},
-                            prototype.newInstance());
+                            new String[]{fieldName}, new String[]{(String) value});
             ResultSet rs = preparedStatement.executeQuery();
             if (!rs.next()) {
                 throw new NoSuchElementException();
             }
             byte[] mBytes = rs.getBytes(org.commcare.modern.database.DatabaseHelper.DATA_COL);
             return readFromBytes(mBytes);
-        } catch (SQLException | InstantiationException |
-                IllegalAccessException | NullPointerException | ClassNotFoundException e) {
+        } catch (SQLException | NullPointerException | ClassNotFoundException e) {
             throw new RuntimeException(e);
         } finally {
             try {
@@ -262,22 +271,22 @@ public class SqliteIndexedStorageUtility<T extends Persistable>
 
     @Override
     public int add(T e) {
-        Connection c = null;
+        Connection connection = null;
         try {
-            c = getConnection();
-            int id = SqlHelper.insertToTable(c, tableName, e);
-            c.close();
-            c = getConnection();
+            connection = getConnection();
+            int id = SqlHelper.insertToTable(connection, tableName, e);
+            connection.close();
+            connection = getConnection();
             e.setID(id);
-            SqlHelper.updateId(c, tableName, e);
-            c.close();
+            SqlHelper.updateId(connection, tableName, e);
+            connection.close();
             return id;
         } catch (SQLException | ClassNotFoundException ex) {
             throw new RuntimeException(ex);
         } finally {
             try {
-                if (c != null) {
-                    c.close();
+                if (connection != null) {
+                    connection.close();
                 }
             } catch (SQLException ex) {
                 ex.printStackTrace();
@@ -293,10 +302,10 @@ public class SqliteIndexedStorageUtility<T extends Persistable>
     @Override
     public boolean exists(int id) {
         PreparedStatement preparedStatement = null;
-        Connection c = null;
+        Connection connection = null;
         try {
-            c = getConnection();
-            preparedStatement = SqlHelper.prepareIdSelectStatement(c, this.tableName, id);
+            connection = getConnection();
+            preparedStatement = SqlHelper.prepareIdSelectStatement(connection, this.tableName, id);
             ResultSet rs = preparedStatement.executeQuery();
             if (rs.next()) {
                 return true;
@@ -308,8 +317,8 @@ public class SqliteIndexedStorageUtility<T extends Persistable>
                 if (preparedStatement != null) {
                     preparedStatement.close();
                 }
-                if (c != null) {
-                    c.close();
+                if (connection != null) {
+                    connection.close();
                 }
             } catch (SQLException e) {
                 e.printStackTrace();
@@ -327,11 +336,11 @@ public class SqliteIndexedStorageUtility<T extends Persistable>
     @Override
     public int getNumRecords() {
         PreparedStatement preparedStatement = null;
-        Connection c = null;
+        Connection connection = null;
         try {
-            c = getConnection();
+            connection = getConnection();
             String sqlQuery = "SELECT COUNT (*) FROM " + this.tableName + ";";
-            preparedStatement = c.prepareStatement(sqlQuery);
+            preparedStatement = connection.prepareStatement(sqlQuery);
             ResultSet rs = preparedStatement.executeQuery();
             return rs.getInt(1);
         } catch (Exception e) {
@@ -341,8 +350,8 @@ public class SqliteIndexedStorageUtility<T extends Persistable>
                 if (preparedStatement != null) {
                     preparedStatement.close();
                 }
-                if (c != null) {
-                    c.close();
+                if (connection != null) {
+                    connection.close();
                 }
             } catch (SQLException e) {
                 e.printStackTrace();
@@ -376,10 +385,10 @@ public class SqliteIndexedStorageUtility<T extends Persistable>
     @Override
     public byte[] readBytes(int id) {
         PreparedStatement preparedStatement = null;
-        Connection c = null;
+        Connection connection = null;
         try {
-            c = getConnection();
-            preparedStatement = SqlHelper.prepareIdSelectStatement(c, this.tableName, id);
+            connection = getConnection();
+            preparedStatement = SqlHelper.prepareIdSelectStatement(connection, this.tableName, id);
             if (preparedStatement == null) {
                 return null;
             }
@@ -392,8 +401,8 @@ public class SqliteIndexedStorageUtility<T extends Persistable>
                 if (preparedStatement != null) {
                     preparedStatement.close();
                 }
-                if (c != null) {
-                    c.close();
+                if (connection != null) {
+                    connection.close();
                 }
             } catch (SQLException e) {
                 e.printStackTrace();
@@ -404,16 +413,16 @@ public class SqliteIndexedStorageUtility<T extends Persistable>
 
     @Override
     public void update(int id, Persistable p) {
-        Connection c = null;
+        Connection connection = null;
         try {
-            c = getConnection();
-            SqlHelper.updateToTable(c, tableName, p, id);
+            connection = getConnection();
+            SqlHelper.updateToTable(connection, tableName, p, id);
         } catch (SQLException | ClassNotFoundException e) {
             throw new RuntimeException(e);
         } finally {
             try {
-                if (c != null) {
-                    c.close();
+                if (connection != null) {
+                    connection.close();
                 }
             } catch (SQLException e) {
                 e.printStackTrace();
@@ -423,17 +432,16 @@ public class SqliteIndexedStorageUtility<T extends Persistable>
 
     @Override
     public void remove(int id) {
-        Connection c = null;
+        Connection connection = null;
         try {
-            c = getConnection();
-            SqlHelper.deleteIdFromTable(c, tableName, id);
-            c.close();
+            connection = getConnection();
+            SqlHelper.deleteIdFromTable(connection, tableName, id);
         } catch (SQLException | ClassNotFoundException e) {
             throw new RuntimeException(e);
         } finally {
             try {
-                if (c != null) {
-                    c.close();
+                if (connection != null) {
+                    connection.close();
                 }
             } catch (SQLException e) {
                 e.printStackTrace();
@@ -448,17 +456,17 @@ public class SqliteIndexedStorageUtility<T extends Persistable>
 
     @Override
     public void removeAll() {
-        Connection c = null;
+        Connection connection = null;
         try {
-            c = getConnection();
-            SqlHelper.deleteAllFromTable(c, tableName);
-            c.close();
+            connection = getConnection();
+            SqlHelper.deleteAllFromTable(connection, tableName);
+            connection.close();
         } catch (SQLException | ClassNotFoundException e) {
             throw new RuntimeException(e);
         } finally {
             try {
-                if (c != null) {
-                    c.close();
+                if (connection != null) {
+                    connection.close();
                 }
             } catch (SQLException e) {
                 e.printStackTrace();
@@ -477,4 +485,106 @@ public class SqliteIndexedStorageUtility<T extends Persistable>
         return iterate();
     }
 
+    public void getIDsForValues(String[] namesToMatch, String[] valuesToMatch, LinkedHashSet<Integer> ids) {
+        Connection connection = null;
+        PreparedStatement preparedStatement = null;
+        try {
+            connection = this.getConnection();
+            preparedStatement = SqlHelper.prepareTableSelectStatement(connection, this.tableName,
+                    namesToMatch, valuesToMatch);
+            if (preparedStatement == null) {
+                return;
+            }
+            ResultSet resultSet = preparedStatement.executeQuery();
+            while (resultSet.next()) {
+                ids.add(resultSet.getInt(DatabaseHelper.ID_COL));
+            }
+        } catch (SQLException | ClassNotFoundException e) {
+            throw new RuntimeException(e);
+        } finally {
+            try {
+                if (preparedStatement != null) {
+                    preparedStatement.close();
+                }
+                if (connection != null) {
+                    connection.close();
+                }
+            } catch (SQLException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private RuntimeException logAndWrap(Exception e, String message) {
+        RuntimeException re = new RuntimeException(message + " while inflating type " + prototype.getName());
+        re.initCause(e);
+        Logger.log("Error:", e.getMessage());
+        return re;
+    }
+
+    /**
+     * @param dbEntryId Set the deserialized persistable's id to the database entry id.
+     *                  Doing so now is more effecient then during writes
+     */
+    public T newObject(InputStream serializedObjectInputStream, int dbEntryId) {
+        try {
+            T e = prototype.newInstance();
+            e.readExternal(new DataInputStream(serializedObjectInputStream),
+                    PrototypeManager.getDefault());
+            e.setID(dbEntryId);
+
+            return e;
+        } catch (IllegalAccessException e) {
+            throw logAndWrap(e, "Illegal Access Exception");
+        } catch (InstantiationException e) {
+            throw logAndWrap(e, "Instantiation Exception");
+        } catch (IOException e) {
+            throw logAndWrap(e, "Totally non-sensical IO Exception");
+        } catch (DeserializationException e) {
+            throw logAndWrap(e, "CommCare ran into an issue deserializing data");
+        }
+    }
+
+    /**
+     * @param dbEntryId Set the deserialized persistable's id to the database entry id.
+     *                  Doing so now is more effecient then during writes
+     */
+    public T newObject(byte[] serializedObjectAsBytes, int dbEntryId) {
+        return newObject(new ByteArrayInputStream(serializedObjectAsBytes), dbEntryId);
+    }
+
+    public void bulkRead(LinkedHashSet<Integer> body, HashMap<Integer, T> recordMap) {
+        List<Pair<String, String[]>> whereParamList = TableBuilder.sqlList(body);
+        PreparedStatement preparedStatement = null;
+        Connection connection = null;
+        try {
+            connection = getConnection();
+            for (Pair<String, String[]> querySet : whereParamList) {
+
+                preparedStatement =
+                        SqlHelper.prepareTableSelectStatement(connection, this.tableName, querySet.first, querySet.second);
+                ResultSet resultSet = preparedStatement.executeQuery();
+
+                while (resultSet.next()) {
+                    int index = resultSet.findColumn(DatabaseHelper.DATA_COL);
+                    byte[] data = resultSet.getBytes(index);
+                    recordMap.put(resultSet.getInt(DatabaseHelper.ID_COL),
+                            newObject(data, resultSet.getInt(DatabaseHelper.ID_COL)));
+                }
+            }
+        } catch (SQLException | ClassNotFoundException e) {
+            throw new RuntimeException(e);
+        } finally {
+            try {
+                if (preparedStatement != null) {
+                    preparedStatement.close();
+                }
+                if (connection != null) {
+                    connection.close();
+                }
+            } catch (SQLException e) {
+                e.printStackTrace();
+            }
+        }
+    }
 }

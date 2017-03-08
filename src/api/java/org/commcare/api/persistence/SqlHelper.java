@@ -26,6 +26,9 @@ import java.util.Map;
  * Created by wpride1 on 8/11/15.
  */
 public class SqlHelper {
+
+    public static final boolean SQL_DEBUG = true;
+
     public static void dropTable(Connection c, String storageKey) {
         String sqlStatement = "DROP TABLE IF EXISTS " + storageKey;
         PreparedStatement preparedStatement = null;
@@ -83,18 +86,36 @@ public class SqlHelper {
     public static PreparedStatement prepareTableSelectStatement(Connection c,
                                                                 String storageKey,
                                                                 String[] fields,
-                                                                String[] values,
-                                                                Persistable p) {
-        TableBuilder tableBuilder = new TableBuilder(storageKey);
-        tableBuilder.addData(p);
-        Pair<String, String[]> pair = DatabaseHelper.createWhere(fields, values, p);
-
+                                                                String[] values) {
+        Pair<String, String[]> pair = DatabaseHelper.createWhere(fields, values, null);
         try {
             String queryString =
                     "SELECT * FROM " + storageKey + " WHERE " + pair.first + ";";
             PreparedStatement preparedStatement = c.prepareStatement(queryString);
             for (int i = 0; i < pair.second.length; i++) {
                 preparedStatement.setString(i + 1, pair.second[i]);
+            }
+            return preparedStatement;
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * @throws IllegalArgumentException when one or more of the fields we're selecting on
+     *                                  is not a valid key to select on for this object
+     */
+    public static PreparedStatement prepareTableSelectStatement(Connection c,
+                                                                String storageKey,
+                                                                String where,
+                                                                String values[]) {
+        PreparedStatement preparedStatement = null;
+        try {
+            String queryString =
+                    "SELECT * FROM " + storageKey + " WHERE " + where + ";";
+            preparedStatement = c.prepareStatement(queryString);
+            for (int i = 0; i < values.length; i++) {
+                preparedStatement.setString(i + 1, values[i]);
             }
             return preparedStatement;
         } catch (SQLException e) {
@@ -141,7 +162,7 @@ public class SqlHelper {
         }
         stringBuilder.append(") VALUES (");
         prefix = "";
-        for (int i = 0; i <= values.size(); i++) {
+        for (int i = 0; i < values.size(); i++) {
             stringBuilder.append(prefix);
             prefix = ",";
             stringBuilder.append("?");
@@ -308,6 +329,50 @@ public class SqlHelper {
             i++;
         }
         return i;
+    }
+
+    public static void deleteFromTableWhere(Connection connection, String tableName, String whereClause, String arg) {
+        String query = "DELETE FROM " + tableName + " WHERE " + whereClause + ";";
+
+        PreparedStatement preparedStatement = null;
+        try {
+            preparedStatement = connection.prepareStatement(query);
+            preparedStatement.setString(1, arg);
+            preparedStatement.execute();
+        } catch (SQLException e) {
+            e.printStackTrace();
+        } finally {
+            if (preparedStatement != null) {
+                try {
+                    preparedStatement.close();
+                } catch (SQLException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        }
+    }
+
+    public static void deleteFromTableWhere(Connection connection, String tableName, String whereClause, String[] args) {
+        String query = "DELETE FROM " + tableName + " WHERE " + whereClause + ";";
+
+        PreparedStatement preparedStatement = null;
+        try {
+            preparedStatement = connection.prepareStatement(query);
+            for(int i = 1; i <= args.length; i++) {
+                preparedStatement.setString(i, args[i - 1]);
+            }
+            preparedStatement.execute();
+        } catch (SQLException e) {
+            e.printStackTrace();
+        } finally {
+            if (preparedStatement != null) {
+                try {
+                    preparedStatement.close();
+                } catch (SQLException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        }
     }
 
     /**
